@@ -335,21 +335,18 @@ function clashFix(content, rawNodes) {
 		content = result;
 	}
 
-	// REALITY fix: Detect and inject reality-opts for Trojan/VLESS nodes
-	if (rawNodes && content.includes('sni:') && (content.includes('type: trojan') || content.includes('type: vless'))) {
-		// Build a lookup: server:port -> { pbk, sid, fp, security }
+	// REALITY fix: inject reality-opts for Trojan/VLESS nodes missing them
+	if (rawNodes && (content.includes('type: trojan') || content.includes('type: vless'))) {
+		// Build lookup: server:port -> {pbk, sid, fp} from raw node URLs
 		const realityNodes = {};
 		const nodeLines = rawNodes.split('\n').filter(l => l.includes('://'));
 		for (const nodeUrl of nodeLines) {
 			try {
-				// Extract query string: everything after ? and before #
 				const qIdx = nodeUrl.indexOf('?');
 				const hashIdx = nodeUrl.indexOf('#', qIdx > 0 ? qIdx : 0);
 				const queryStr = nodeUrl.substring(qIdx + 1, hashIdx > 0 ? hashIdx : undefined);
 				const params = new URLSearchParams(queryStr);
-				const security = params.get('security') || '';
-				if (security !== 'reality') continue;
-				// Extract host:port: everything between @ and ? or end
+				if (params.get('security') !== 'reality') continue;
 				const atIdx = nodeUrl.indexOf('@');
 				if (atIdx < 0) continue;
 				const endIdx = qIdx > 0 ? qIdx : (hashIdx > 0 ? hashIdx : nodeUrl.length);
@@ -357,12 +354,10 @@ function clashFix(content, rawNodes) {
 				const colonIdx = hostPort.lastIndexOf(':');
 				const host = colonIdx >= 0 ? hostPort.substring(0, colonIdx) : hostPort;
 				const port = colonIdx >= 0 ? hostPort.substring(colonIdx + 1) : '443';
-				const key = host + ':' + port;
-				realityNodes[key] = {
+				realityNodes[host + ':' + port] = {
 					pbk: params.get('pbk') || '',
 					sid: params.get('sid') || '',
-					fp: params.get('fp') || 'chrome',
-					sni: params.get('sni') || ''
+					fp: params.get('fp') || 'chrome'
 				};
 			} catch (e) {}
 		}
@@ -370,64 +365,81 @@ function clashFix(content, rawNodes) {
 		if (Object.keys(realityNodes).length > 0) {
 			const lines = content.includes(CRLF) ? content.split(CRLF) : content.split('\n');
 			let result = '';
-			let block = [];
-			let inBlock = false;
-
-			function flushBlock() {
-				if (block.length === 0) return;
-				// Find server, port, type in the block
-				let server = '', port = '', ptype = '';
-				for (const l of block) {
-					const t = l.trim();
-					if (t.startsWith('server:')) server = t.replace(/^server:\s*['"]?/, '').replace(/['"]?\s*$/, '').trim();
-					if (t.startsWith('port:')) port = t.replace(/^port:\s*/, '').trim();
-					if (t.startsWith('type:')) ptype = t.replace(/^type:\s*/, '').trim();
-				}
-				const key = server + ':' + port;
-				const reality = realityNodes[key];
-				const hasReality = block.some(l => l.trim().startsWith('reality-opts:'));
-				if (reality && !hasReality && (ptype === 'trojan' || ptype === 'vless')) {
-					// Find insertion point: after network/skip-cert-verify/tfo line
-					let insertIdx = block.length;
-					for (let j = block.length - 1; j >= 0; j--) {
-						const t = block[j].trim();
-						if (t.startsWith('network:') || t.startsWith('skip-cert-verify:') || t.startsWith('tfo:') || t.startsWith('udp:')) {
-							insertIdx = j + 1;
-							break;
-						}
-					}
-					const indent = '  ';
-					block.splice(insertIdx, 0,
-						indent + 'client-fingerprint: ' + reality.fp,
-						indent + 'reality-opts:',
-						indent + '  public-key: ' + reality.pbk,
-						indent + '  short-id: ' + reality.sid
-					);
-				}
-				for (const l of block) result += l + '\n';
-				block = [];
-			}
 
 			for (let i = 0; i < lines.length; i++) {
-				const line = lines[i];
+				let line = lines[i];
 				const trimmed = line.trim();
-				// Start of a proxy block
-				if (trimmed.startsWith('- name:') || trimmed.startsWith('- {')) {
-					flushBlock();
-					inBlock = true;
-				}
-				if (inBlock) {
-					block.push(line);
-					// End of block: empty line or next proxy
-					if (trimmed === '' || (i + 1 < lines.length && (lines[i + 1].trim().startsWith('- name:') || lines[i + 1].trim().startsWith('- {')))) {
-						flushBlock();
-						inBlock = false;
+
+				// Handle INLINE format: - {name: ..., server: ..., port: ..., type: trojan, ...}
+				if (trimmed.startsWith('- {') && (trimmed.includes('type: trojan') || trimmed.includes('type: vless'))) {
+					const sMatch = trimmed.match(/server:\s*['"]?([^,'"}]+)/);
+					const pMatch = trimmed.match(/port:\s*(\d+)/);
+					if (sMatch && pMatch) {
+						const key = sMatch[1].trim() + ':' + pMatch[1];
+						const reality = realityNodes[key];
+						if (reality && !trimmed.includes('reality-opts:')) {
+							// Inject before the closing }
+							const inject = ', client-fingerprint: ' + reality.fp +
+								', reality-opts: {public-key: ' + reality.pbk +
+								', short-id: "' + reality.sid + '"}';
+							line = trimmed.slice(0, -1) + inject + '}';
+							// Restore leading whitespace
+							const leadWS = line.length - line.trimStart().length;
+							line = lines[i].substring(0, lines[i].length - lines[i].trimStart().length) + line.trimStart();
+						}
 					}
+					result += line + '\n';
+					continue;
+				}
+
+				// Handle MULTI-LINE format: - name: ...
+				// We need to collect multi-line blocks
+				if (trimmed.startsWith('- name:') || trimmed.startsWith('- {')) {
+					// Collect this block
+					let block = [line];
+					let j = i + 1;
+					while (j < lines.length && lines[j].trim() !== '' && 
+						   !lines[j].trim().startsWith('- name:') && 
+						   !lines[j].trim().startsWith('- {') &&
+						   !lines[j].trim().startsWith('proxy-groups:') &&
+						   !lines[j].trim().startsWith('rules:')) {
+						block.push(lines[j]);
+						j++;
+					}
+					i = j - 1; // skip processed lines
+
+					// Parse server/port/type from multi-line block
+					let server = '', port = '', ptype = '';
+					for (const l of block) {
+						const t = l.trim();
+						if (t.startsWith('server:')) server = t.replace(/^server:\s*['"]?/, '').replace(/['"]?\s*$/, '').trim();
+						if (t.startsWith('port:')) port = t.replace(/^port:\s*/, '').trim();
+						if (t.startsWith('type:')) ptype = t.replace(/^type:\s*/, '').trim();
+					}
+					const key = server + ':' + port;
+					const reality = realityNodes[key];
+					const hasReality = block.some(l => l.trim().startsWith('reality-opts:'));
+					if (reality && !hasReality && (ptype === 'trojan' || ptype === 'vless')) {
+						let insertIdx = block.length;
+						for (let k = block.length - 1; k >= 0; k--) {
+							const t = block[k].trim();
+							if (t.startsWith('network:') || t.startsWith('skip-cert-verify:') || t.startsWith('tfo:') || t.startsWith('udp:')) {
+								insertIdx = k + 1;
+								break;
+							}
+						}
+						block.splice(insertIdx, 0,
+							'  client-fingerprint: ' + reality.fp,
+							'  reality-opts:',
+							'    public-key: ' + reality.pbk,
+							'    short-id: ' + reality.sid
+						);
+					}
+					for (const l of block) result += l + '\n';
 				} else {
 					result += line + '\n';
 				}
 			}
-			flushBlock(); // flush last block
 			content = result;
 		}
 	}
