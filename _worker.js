@@ -205,7 +205,7 @@ export default {
 					//throw new Error(`Error fetching subConverterUrl: ${subConverterResponse.status} ${subConverterResponse.statusText}`);
 				}
 				let subConverterContent = await subConverterResponse.text();
-				if (订阅格式 == 'clash') subConverterContent = await clashFix(subConverterContent);
+				if (订阅格式 == 'clash') subConverterContent = await clashFix(subConverterContent, req_data);
 				return new Response(subConverterContent, {
 					headers: {
 						"Content-Disposition": `attachment; filename*=utf-8''${encodeURIComponent(FileName)}`,
@@ -312,11 +312,12 @@ async function MD5MD5(text) {
 	return secondHex.toLowerCase();
 }
 
-function clashFix(content) {
+function clashFix(content, rawNodes) {
+	const CRLF = String.fromCharCode(13, 10);
 	if (content.includes('wireguard') && !content.includes('remote-dns-resolve')) {
 		let lines;
-		if (content.includes('\r\n')) {
-			lines = content.split('\r\n');
+		if (content.includes(CRLF)) {
+			lines = content.split(CRLF);
 		} else {
 			lines = content.split('\n');
 		}
@@ -331,9 +332,106 @@ function clashFix(content) {
 				result += line + '\n';
 			}
 		}
-
 		content = result;
 	}
+
+	// REALITY fix: Detect and inject reality-opts for Trojan/VLESS nodes
+	if (rawNodes && content.includes('sni:') && (content.includes('type: trojan') || content.includes('type: vless'))) {
+		// Build a lookup: server:port -> { pbk, sid, fp, security }
+		const realityNodes = {};
+		const nodeLines = rawNodes.split('\n').filter(l => l.includes('://'));
+		for (const nodeUrl of nodeLines) {
+			try {
+				// Extract query string: everything after ? and before #
+				const qIdx = nodeUrl.indexOf('?');
+				const hashIdx = nodeUrl.indexOf('#', qIdx > 0 ? qIdx : 0);
+				const queryStr = nodeUrl.substring(qIdx + 1, hashIdx > 0 ? hashIdx : undefined);
+				const params = new URLSearchParams(queryStr);
+				const security = params.get('security') || '';
+				if (security !== 'reality') continue;
+				// Extract host:port: everything between @ and ? or end
+				const atIdx = nodeUrl.indexOf('@');
+				if (atIdx < 0) continue;
+				const endIdx = qIdx > 0 ? qIdx : (hashIdx > 0 ? hashIdx : nodeUrl.length);
+				const hostPort = nodeUrl.substring(atIdx + 1, endIdx);
+				const colonIdx = hostPort.lastIndexOf(':');
+				const host = colonIdx >= 0 ? hostPort.substring(0, colonIdx) : hostPort;
+				const port = colonIdx >= 0 ? hostPort.substring(colonIdx + 1) : '443';
+				const key = host + ':' + port;
+				realityNodes[key] = {
+					pbk: params.get('pbk') || '',
+					sid: params.get('sid') || '',
+					fp: params.get('fp') || 'chrome',
+					sni: params.get('sni') || ''
+				};
+			} catch (e) {}
+		}
+
+		if (Object.keys(realityNodes).length > 0) {
+			const lines = content.includes(CRLF) ? content.split(CRLF) : content.split('\n');
+			let result = '';
+			let block = [];
+			let inBlock = false;
+
+			function flushBlock() {
+				if (block.length === 0) return;
+				// Find server, port, type in the block
+				let server = '', port = '', ptype = '';
+				for (const l of block) {
+					const t = l.trim();
+					if (t.startsWith('server:')) server = t.replace(/^server:\s*['"]?/, '').replace(/['"]?\s*$/, '').trim();
+					if (t.startsWith('port:')) port = t.replace(/^port:\s*/, '').trim();
+					if (t.startsWith('type:')) ptype = t.replace(/^type:\s*/, '').trim();
+				}
+				const key = server + ':' + port;
+				const reality = realityNodes[key];
+				const hasReality = block.some(l => l.trim().startsWith('reality-opts:'));
+				if (reality && !hasReality && (ptype === 'trojan' || ptype === 'vless')) {
+					// Find insertion point: after network/skip-cert-verify/tfo line
+					let insertIdx = block.length;
+					for (let j = block.length - 1; j >= 0; j--) {
+						const t = block[j].trim();
+						if (t.startsWith('network:') || t.startsWith('skip-cert-verify:') || t.startsWith('tfo:') || t.startsWith('udp:')) {
+							insertIdx = j + 1;
+							break;
+						}
+					}
+					const indent = '  ';
+					block.splice(insertIdx, 0,
+						indent + 'client-fingerprint: ' + reality.fp,
+						indent + 'reality-opts:',
+						indent + '  public-key: ' + reality.pbk,
+						indent + '  short-id: ' + reality.sid
+					);
+				}
+				for (const l of block) result += l + '\n';
+				block = [];
+			}
+
+			for (let i = 0; i < lines.length; i++) {
+				const line = lines[i];
+				const trimmed = line.trim();
+				// Start of a proxy block
+				if (trimmed.startsWith('- name:') || trimmed.startsWith('- {')) {
+					flushBlock();
+					inBlock = true;
+				}
+				if (inBlock) {
+					block.push(line);
+					// End of block: empty line or next proxy
+					if (trimmed === '' || (i + 1 < lines.length && (lines[i + 1].trim().startsWith('- name:') || lines[i + 1].trim().startsWith('- {')))) {
+						flushBlock();
+						inBlock = false;
+					}
+				} else {
+					result += line + '\n';
+				}
+			}
+			flushBlock(); // flush last block
+			content = result;
+		}
+	}
+
 	return content;
 }
 
