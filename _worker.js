@@ -456,11 +456,11 @@ function clashFix(content, rawNodes) {
 					const vm = JSON.parse(jsonStr);
 					const port = parseInt(vm.port);
 					if (port === 40405 || port === 35127) {
-						let clash = `  - {name: ${vm.ps}, server: ${vm.add}, port: ${vm.port}, type: vmess, uuid: ${vm.id}, alterId: 0, cipher: auto`;
+						let clash = `  - {name: ${vm.ps}, server: ${vm.add}, port: ${vm.port}, type: vmess, uuid: ${vm.id}, alterId: 0, cipher: auto, tls: true, skip-cert-verify: true, servername: ${vm.add}, tfo: true`;
 						if (vm.net === 'httpupgrade') {
-							clash += `, tls: true, skip-cert-verify: true, tfo: true, network: httpupgrade`;
+							clash += `, network: httpupgrade`;
 						} else if (vm.net === 'xhttp') {
-							clash += `, tls: true, skip-cert-verify: true, tfo: true, network: xhttp, xhttp-opts: {path: /, mode: auto, sc-max-each-post-bytes: 1000000, x-padding-bytes: 50-500}`;
+							clash += `, network: xhttp, xhttp-opts: {path: /, mode: auto, sc-max-each-post-bytes: 1000000, x-padding-bytes: 50-500}`;
 						}
 						clash += '}';
 						injected.push(clash);
