@@ -448,6 +448,7 @@ function clashFix(content, rawNodes) {
 	if (content.includes('proxies:') && rawNodes) {
 		const nodeLines = rawNodes.split('\n').filter(l => l.includes('://'));
 		const injected = [];
+		const injectedNames = [];
 		for (const nodeUrl of nodeLines) {
 			try {
 				if (nodeUrl.startsWith('vmess://')) {
@@ -463,14 +464,30 @@ function clashFix(content, rawNodes) {
 						}
 						clash += '}';
 						injected.push(clash);
+						injectedNames.push(vm.ps);
 					}
 				}
 			} catch (e) {}
 		}
 		if (injected.length > 0) {
+			// Insert proxies before proxy-groups
 			const pgIdx = content.indexOf('\nproxy-groups:');
 			if (pgIdx > 0) {
 				content = content.substring(0, pgIdx) + '\n' + injected.join('\n') + '\n' + content.substring(pgIdx);
+			}
+			// Inject into 手动切换 and 自动选择 groups
+			for (const gname of ['☑️ 手动切换', '♻️ 自动选择']) {
+				const escaped = gname.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+				const groupEnd = content.indexOf(`  - name: ${gname}`);
+				if (groupEnd > 0) {
+					// Find the end of this group's proxies list
+					const nextGroup = content.indexOf('\n  - name:', groupEnd + 1);
+					const insertPos = nextGroup > 0 ? nextGroup : content.length;
+					const prefix = content.substring(0, insertPos);
+					const suffix = content.substring(insertPos);
+					const injections = injectedNames.map(n => `      - ${n}`).join('\n');
+					content = prefix + '\n' + injections + '\n' + suffix;
+				}
 			}
 		}
 	}
