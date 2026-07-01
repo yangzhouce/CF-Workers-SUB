@@ -180,11 +180,11 @@ export default {
 					}
 				});
 			} else if (订阅格式 == 'clash') {
-				subConverterUrl = `${subProtocol}://${subConverter}/sub?target=clash&url=${encodeURIComponent(订阅转换URL)}&insert=false&config=${encodeURIComponent(subConfig)}&emoji=true&list=false&tfo=false&scv=true&fdn=false&sort=false&new_name=true`;
+				subConverterUrl = `${subProtocol}://${subConverter}/sub?target=clash&url=${encodeURIComponent(订阅转换URL)}&insert=false&config=${encodeURIComponent(subConfig)}&emoji=true&list=false&tfo=true&scv=true&fdn=false&sort=false&new_name=true`;
 			} else if (订阅格式 == 'singbox') {
-				subConverterUrl = `${subProtocol}://${subConverter}/sub?target=singbox&url=${encodeURIComponent(订阅转换URL)}&insert=false&config=${encodeURIComponent(subConfig)}&emoji=true&list=false&tfo=false&scv=true&fdn=false&sort=false&new_name=true`;
-			} else if (订阅格式 == 'surge') {
-				subConverterUrl = `${subProtocol}://${subConverter}/sub?target=surge&ver=4&url=${encodeURIComponent(订阅转换URL)}&insert=false&config=${encodeURIComponent(subConfig)}&emoji=true&list=false&tfo=false&scv=true&fdn=false&sort=false&new_name=true`;
+				subConverterUrl = `${subProtocol}://${subConverter}/sub?target=singbox&url=${encodeURIComponent(订阅转换URL)}&insert=false&config=${encodeURIComponent(subConfig)}&emoji=true&list=false&tfo=true&scv=true&fdn=false&sort=false&new_name=true`;
+				} else if (订阅格式 == 'surge') {
+					subConverterUrl = `${subProtocol}://${subConverter}/sub?target=surge&ver=4&url=${encodeURIComponent(订阅转换URL)}&insert=false&config=${encodeURIComponent(subConfig)}&emoji=true&list=false&tfo=true&scv=true&fdn=false&sort=false&new_name=true`;
 			} else if (订阅格式 == 'quanx') {
 				subConverterUrl = `${subProtocol}://${subConverter}/sub?target=quanx&url=${encodeURIComponent(订阅转换URL)}&insert=false&config=${encodeURIComponent(subConfig)}&emoji=true&list=false&tfo=false&scv=true&fdn=false&sort=false&udp=true`;
 			} else if (订阅格式 == 'loon') {
@@ -441,6 +441,37 @@ function clashFix(content, rawNodes) {
 				}
 			}
 			content = result;
+		}
+	}
+
+	// Inject missing nodes dropped by subconverter (HTTPUpgrade, XHTTP-TLS)
+	if (content.includes('proxies:') && rawNodes) {
+		const nodeLines = rawNodes.split('\n').filter(l => l.includes('://'));
+		const injected = [];
+		for (const nodeUrl of nodeLines) {
+			try {
+				if (nodeUrl.startsWith('vmess://')) {
+					const jsonStr = base64Decode(nodeUrl.replace('vmess://', ''));
+					const vm = JSON.parse(jsonStr);
+					const port = parseInt(vm.port);
+					if (port === 40405 || port === 35127) {
+						let clash = `  - {name: ${vm.ps}, server: ${vm.add}, port: ${vm.port}, type: vmess, uuid: ${vm.id}, alterId: 0, cipher: auto`;
+						if (vm.net === 'httpupgrade') {
+							clash += `, tls: true, skip-cert-verify: true, tfo: true, network: httpupgrade`;
+						} else if (vm.net === 'xhttp') {
+							clash += `, tls: true, skip-cert-verify: true, tfo: true, network: xhttp, xhttp-opts: {path: /, mode: auto, sc-max-each-post-bytes: 1000000, x-padding-bytes: 50-500}`;
+						}
+						clash += '}';
+						injected.push(clash);
+					}
+				}
+			} catch (e) {}
+		}
+		if (injected.length > 0) {
+			const pgIdx = content.indexOf('\nproxy-groups:');
+			if (pgIdx > 0) {
+				content = content.substring(0, pgIdx) + '\n' + injected.join('\n') + '\n' + content.substring(pgIdx);
+			}
 		}
 	}
 
